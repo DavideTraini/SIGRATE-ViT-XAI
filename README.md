@@ -45,16 +45,14 @@ In the **Usage_sample** file the user can modify the following parameters:
 
 In our notebook we used the following libraries:
 ```
-PIL=9.2.0  
-scipy=1.9.3  
-transformers=4.30.2  
-torch=2.1.2+cu121  
-torchvision=0.16.2+cu121  
-sklearn=1.4.1.post1  
-numpy=1.24.4  
-pandas=2.1.4  
-matplotlib=3.8.2
-seaborn=0.13.1  
+PIL=10.3.0  
+transformers=4.30.2
+torch=2.2.2
+torchvision=0.17.2
+numpy=1.26.4
+pandas=2.2.2
+matplotlib=3.9.0
+seaborn=0.13.2
 ```
 
 ## Citation
