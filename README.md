@@ -4,9 +4,9 @@ This is the official implementation of the paper: Generating Masks from Similari
 
 ## Abstract
 
-![Multilayer creation](.\Readme_images\Vit_architecture1.png)
+![Multilayer creation](./Readme_images/Vit_architecture1.png)
 
-![Heatmap generation](.\Readme_images\Vit_architecture2.png)
+![Heatmap generation](./Readme_images/Vit_architecture2.png)
 
 
 
@@ -34,7 +34,7 @@ In the **Usage_sample** file the user can modify the following parameters:
 ### Call Parameters
 **`token_ratio`**: percentage of patches which are set to 0 during the binary masks creation;  
 **`starting_layer`**: layer from which are calculated the metrics used to construct the masks;  
-**`masks_layer`**: number of masks for every layer;
+**`masks_layer`**: number of masks for every layer;  
 **`img_path`**: path of the image we want to explain;  
 **`label`**: label on which we want to do explaination; this value is optional and if is not provided the model will give the heatmap associated with the predicted class;  
 
