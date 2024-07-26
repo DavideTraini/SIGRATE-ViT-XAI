@@ -4,6 +4,8 @@ This is the official implementation of the paper: Generating Masks from Similari
 
 ## Abstract
 
+Vision Transformers (ViTs) are becoming the most used architecture to address computer vision tasks due to their outstanding performances. However, the interpretation of the ViT output is still a challenging task, but it is also fundamental to gain trust in these new architectures. In this paper, we want to address this specific task by proposing SIGRATE. Specifically, SIGRATE extracts the embeddings of the image patches and builds the corresponding similarity graph for each attention layer. Then, it generates a set of walks on each similarity graph, where the walk sources are the most relevant and irrelevant patches according to the attention paid by the classification token. Each walk corresponds to the selection of a subset of patches that then generates a binary mask. After that, SIGRATE merges the masks from all the attention layers thanks to the coverage bias formula into a heatmap, which then is reshaped to the same as the input image. Similar to other visual explainability approaches, we tested SIGRATE on two ViT architectures (i.e., ViT and DeiT) and a subset of the ImageNet validation set. The experiments show the promising performances of SIGRATE in terms of Insertion and Deletion metrics. Finally, we report a qualitative analysis to show the capabilities of SIGRATE on three images and an ablation study to evaluate the hyperparameters’ impact on the SIGRATE performance.
+
 ![Multilayer creation](./Readme_images/Vit_architecture1.png)
 
 ![Heatmap generation](./Readme_images/Vit_architecture2.png)
@@ -14,12 +16,12 @@ This is the official implementation of the paper: Generating Masks from Similari
 
 This repository can be directly downloaded and executed locally. The required libraries are displayed in Section [Requirements](#requirements)
 
-In the **Implementation** folder we provide a file called **Usage_example.ipynb** where the user can run the cells and visualize insertion AUC, deletion AUC and heatmaps of one or more images. 
+In the **Implementation** folder we provide a file called **Usage_example** where the user can run the cells and visualize insertion AUC, deletion AUC and heatmaps of one or more images. 
 The code can be used both for ViT and DeiT explaination. In addition, this folder contains the following python files:
 - **utils**: contains some functions used for the visualization of AUCs and heatmaps.
-- **feature_extractor.py**: contains the definition of the feature extractor class used by ViT and DeiT models.
-- **hook.py**: contains the definition of the hook classes used by ViT and DeiT models.
-- **sigrate.py**: contains the implementation of the model described in the paper.
+- **feature_extractor**: contains the definition of the feature extractor class used by ViT and DeiT models.
+- **hook**: contains the definition of the hook classes used by ViT and DeiT models.
+- **sigrate**: contains the implementation of the model described in the paper.
 
 The **imgs_idx** file contains the indexes of the images used for testing our approach, which are selected from the ImageNet 2012 validation dataset. To download the dataset you need to login on [ImageNet site](https://image-net.org/challenges/LSVRC/2012/2012-downloads.php) and click on ILSVRC2012, after this download the 'Development kit (Task 1 & 2)', that contains the ground truth labels, and the 'Validation images (all tasks)'.
 
