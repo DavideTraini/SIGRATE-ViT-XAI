@@ -69,6 +69,42 @@ def plot_auc(scores, op, perc_ins):
     plt.show()
 
 
+
+def overlay2(image, saliency1, saliency2, title = 'Two_classes', alpha=0.7):
+    """
+    Args:
+        image (torch.Tensor): Input image tensor.
+        saliency (torch.Tensor): Saliency map tensor.
+        alpha (float): Transparency level for overlaying the saliency on the image.
+
+    Displays an overlay of the input image and saliency map using bilinear and nearest interpolation.
+    """
+    fig, ax = plt.subplots(1, 3, figsize=(10, 6))
+    image = image.permute(1, 2, 0)
+    saliency1 = interpolate(saliency1.reshape((1, 1, *saliency1.shape)), size=image.shape[:2], mode='bilinear')
+    saliency1 = saliency1.squeeze()
+    saliency2 = interpolate(saliency2.reshape((1, 1, *saliency2.shape)), size=image.shape[:2], mode='bilinear')
+    saliency2 = saliency2.squeeze()
+    ax[0].imshow(image)
+    ax[0].set_title('Original Image')
+    ax[1].imshow(image)
+    ax[1].imshow(saliency1, alpha=alpha, cmap='jet')
+    ax[1].set_title('Class: Elephant')
+    ax[2].imshow(image)
+    ax[2].imshow(saliency2, alpha=alpha, cmap='jet')
+    ax[2].set_title('Class: Zebra')
+    ax[0].set_xticks([])
+    ax[0].set_yticks([])
+    ax[1].set_xticks([])
+    ax[1].set_yticks([])
+    ax[2].set_xticks([])
+    ax[2].set_yticks([])
+    plt.show()
+    plt.subplots_adjust(hspace=0.5, wspace=0.3)
+    fig.savefig(f'{title}.pdf', bbox_inches='tight')
+    plt.show()
+
+
 def plot_auc_line(scores, perc, images, label_list, saliency_list, title='AUC', figsize_x=10, figsize_y=3, alpha=0.7):
     """
     Args:
