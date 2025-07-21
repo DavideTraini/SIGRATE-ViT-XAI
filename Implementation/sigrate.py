@@ -1,15 +1,24 @@
 import numpy as np
 import math
+import random
 from transformers import ViTForImageClassification, ViTImageProcessor, DeiTForImageClassificationWithTeacher
 import torch
 from PIL import Image
 import torch.nn.functional as F
 import torchvision
+import scipy
 from torch.nn.functional import interpolate
 from hook import VIT_Hook, DEIT_Hook
 from feature_extractor import Custom_feature_extractor
+from utils import create_mask
+
+from scipy.ndimage import gaussian_filter
+
+import time 
+import matplotlib.pyplot as plt
 
 
+# Definition of the SIGRATE class
 class SIGRATE:
 
     def __init__(self, model, device):
@@ -34,9 +43,9 @@ class SIGRATE:
         self.model.to(self.device)
 
 
-    def get_saliency(self, img_path, token_ratio, masks_layer, starting_layer = 0, label=False):
+    def get_saliency(self, img_path, token_ratio, rw_layer, starting_layer = 0, label=False):
         """
-        Generates a saliency heatmap for an input image based on embedding similarity.
+        Generates a saliency heatmap for an input image based on embedding similarity and random walks.
 
         Args:
             img_path (str): Path to the input image file.
@@ -53,34 +62,54 @@ class SIGRATE:
         # Open and preprocess the input image
         image = Image.open(img_path).convert('RGB')
 
-        processed_image, attentions_scores, emb, predicted_label = self.classify(image, self.vit_hook, self.image_processor)
+        processed_image, attentions_scores, emb, predicted_label = self.classify(image, self.vit_hook, self.image_processor, label)
 
         # Determine the ground truth label
         ground_truth_label = predicted_label if not label else torch.tensor(label)
 
-        starting_nodes = self.get_best_cls(attentions_scores, masks_layer, starting_layer)
+        starting_nodes = self.get_best_cls(attentions_scores, rw_layer, starting_layer)
       
         # multilayer = self.create_multilayer(attentions_scores, starting_layer)
-        multilayer = self.create_multilayer_emb(emb, starting_layer)
+        multilayer = self.create_multilayer_emb(emb, attentions_scores, starting_layer)
       
         num_layers = multilayer.shape[0]
         total_patches = multilayer.shape[2]
 
-        # Calculate random masks
-        masks_array = self.get_masks(multilayer=multilayer, token_ratio=token_ratio,  masks_layer = masks_layer, starting_nodes = starting_nodes)
+        # Calculate random walks
+        masks_array = self.get_masks(multilayer=multilayer, token_ratio=token_ratio,  rw_layer = rw_layer, starting_nodes = starting_nodes)
 
-        # Convert patch importance list to a tensor
-        mask_tensor = torch.stack(masks_array).to(self.device)
+        
+        B = len(masks_array)
+        
+        mean_len = sum(len(sublist) for sublist in masks_array)/B
 
         # Obtain model predictions for different sampled token configurations
-        confidence_ground_truth_class = self.vit_hook.classify_with_sampled_tokens(processed_image, mask_tensor,
+        confidence_ground_truth_class, top_confidences, top_class_indices = self.vit_hook.classify_with_sampled_tokens(processed_image, masks_array,
                                                                                    ground_truth_label)
 
         confidence_ground_truth_class = torch.tensor(confidence_ground_truth_class).to(self.device)
+
+        # for elem in masks_array:
+        #   mask = create_mask(elem, 224, 16)
+        #   fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+
+        #   # resizer(image, return_tensors="pt")['pixel_values'][0].to('cpu')
+        #   resizer = ViTImageProcessor(do_rescale=False, do_normalize=False)
+        #   result = resizer(image, return_tensors="pt")['pixel_values'][0].to('cpu') * mask.unsqueeze(0).to('cpu')
+          
+        #   ax.imshow(result.permute(1, 2, 0).to(torch.uint8))
+  
+        #   plt.tight_layout()  # Assicura che le immagini siano ben posizionate
+        #   plt.show()
+      
+        num_rows = len(masks_array)
+        num_cols = max(max(sublist) for sublist in masks_array) + 1  # dimensione massima necessaria
         
-        B, _ = mask_tensor.shape
-        binary_mask_tensor = torch.zeros((B, total_patches), dtype=torch.int32).to(self.device)
-        binary_mask_tensor.scatter_(1, mask_tensor, 1)
+        binary_mask_tensor = torch.zeros((num_rows, num_cols), dtype=torch.float32)
+        
+        for i, indices in enumerate(masks_array):
+            binary_mask_tensor[i, indices] = 1
+
       
         # Calculate the final saliency heatmap
         heatmap_ground_truth_class = binary_mask_tensor * confidence_ground_truth_class.view(-1, 1)
@@ -90,92 +119,92 @@ class SIGRATE:
         coverage_bias = torch.where(coverage_bias > 0, coverage_bias, 1)
 
         heatmap_ground_truth_class = heatmap_ground_truth_class / coverage_bias
-        heatmap_ground_truth_class_reshape = heatmap_ground_truth_class.reshape((14, 14))
+        heatmap_ground_truth_class = torch.softmax(heatmap_ground_truth_class, dim = 0)
+        heatmap_ground_truth_class = heatmap_ground_truth_class.reshape((14, 14)).to('cpu')
+
+        # threshold = torch.quantile(heatmap_ground_truth_class.reshape(196), 0.20)
+        threshold = torch.mean(heatmap_ground_truth_class.reshape(196))
+        heatmap = torch.where(heatmap_ground_truth_class < threshold, torch.tensor(0., device=heatmap_ground_truth_class.device), heatmap_ground_truth_class)
+        
+      
+        # ROBA STRANA #
+        
+        def gaussian_kernel(size: int, sigma: float) -> torch.Tensor:
+            """Crea un kernel gaussiano 2D"""
+            coords = torch.arange(size) - size // 2
+            x_grid, y_grid = torch.meshgrid(coords, coords, indexing='ij')
+            kernel = torch.exp(-(x_grid**2 + y_grid**2) / (2 * sigma**2))
+            kernel = kernel / kernel.sum()
+            return kernel
+        
+        # Heatmap di input: (1, 1, 14, 14)  [batch_size=1, channels=1]
+        heatmap = heatmap.reshape(1, 1, 14, 14)
+        
+        # Crea kernel gaussiano 3x3
+        kernel = gaussian_kernel(size=5, sigma=1)
+        kernel = kernel.view(1, 1, 5, 5)  # shape: (out_channels, in_channels, H, W)
+        
+        # Applica convoluzione (padding=1 per mantenere stessa dimensione)
+        smoothed = F.conv2d(heatmap, kernel, padding=2)
+        
+        # Poi prosegui con il tuo codice
+        # mean = smoothed.mean()
+        # std = smoothed.std()
+        # a = 1.0 / std
+        # smoothed = torch.sigmoid(a * (smoothed - mean))**4
+        # smoothed = (smoothed - smoothed.min()) / (smoothed.max() - smoothed.min())
+        smoothed = smoothed**4
+        smoothed = smoothed.reshape((14, 14))
+
+        # threshold = torch.quantile(smoothed.reshape(196), 0.20)
+        # # FINE ROBA STRANA
+        # percentile = torch.quantile(smoothed, 0.5)
+        # smoothed = torch.where(smoothed < mean, torch.tensor(0., device=smoothed.device), smoothed)
+
+        # FINE ROBA STRANA #
+        # threshold = torch.mean(smoothed.reshape(196))
+        # smoothed = torch.where(smoothed < threshold, torch.tensor(0., device=smoothed.device), smoothed)
+
+        print(mean_len)
+      
+        return smoothed, ground_truth_label.item()
 
 
-        return heatmap_ground_truth_class_reshape.to('cpu'), ground_truth_label.item()
 
-
-
-    def classify(self, image, model, image_processor):
-        """
-        Classifies an image using the specified model and image processor.
-
-        Args:
-            image (torch.Tensor): The input image tensor.
-            model (torch.nn.Module): The classification model.
-            image_processor (Custom_feature_extractor): The image processor.
-
-        Returns:
-            tuple: A tuple containing input features, embedding, and the predicted class index.
-        """
-        # Process the input image using the provided image processor
+    def classify(self, image, model, image_processor, class_index):
         inputs = image_processor(images=image, return_tensors="pt")
-
-        # Forward pass through the model with output_hidden_states
-        logits, attentions_scores, embeddings = model.classify_and_capture_outputs(inputs, output_attentions = True)
-
-        # Compute softmax probabilities and predict the class index
+        logits, attention_scores, embeddings = model.classify_and_capture_outputs(inputs, class_index, output_attentions=True)
         probabilities = F.softmax(logits, dim=1)
         predicted_class_idx = torch.argmax(probabilities, dim=1)
+    
+        return inputs, attention_scores, embeddings, predicted_class_idx
 
-        return inputs, attentions_scores, embeddings, predicted_class_idx
 
-    def get_best_cls(self, attentions, masks_layer, starting_layer):
-        """
-        Select the best and worst CLS embeddings based on attention scores.
 
-        Parameters:
-        attentions (list of torch.Tensor): A list of attention score tensors. Each tensor
-                                           has a shape of (num_heads, num_tokens, num_tokens).
-                                           The list length corresponds to the number of layers.
-        masks_layer (int): Number of masks, used to determine how many top and worst
-                        attention scores to select.
-        starting_layer (int): The layer from which to start considering attention scores.
 
-        Returns:
-        torch.Tensor: A tensor containing the indices of the selected top and worst attention scores.
-                      Shape: (num_layers - starting_layer, masks_layer). Each row corresponds to a layer
-                      and contains indices of the selected attention scores.
-        """
-
+    def get_best_cls(self, attentions, rw_layer, starting_layer, ):
         att_list = []
-
-        # Iterate through the list of attention tensors
         for i in range(len(attentions)):
-            # Get the attention scores without the head dimension
-            att_no_head = torch.max(attentions[i][0], dim=0)[0]
+          att_no_head = torch.max(attentions[i][0], dim = 0)[0]
+          if isinstance(self.model, ViTForImageClassification):
+              att_no_head_cls = att_no_head[0, 1:] # embeddings without the CLS token
+          else:
+              att_no_head_cls = att_no_head[0, 2:] # embeddings without the CLS and the distillation token
 
-            # Remove the CLS token (and possibly the distillation token) from the embeddings
-            if isinstance(self.model, ViTForImageClassification):
-                att_no_head_cls = att_no_head[0, 1:]  # embeddings without the CLS token
-            else:
-                att_no_head_cls = att_no_head[0, 2:]  # embeddings without the CLS and the distillation token
-
-            # Add the processed attention scores to the list
-            att_list.append(att_no_head_cls)
-
-        # Calculate the number of worst and top attention scores to select
-        worst_number = int(masks_layer / 2)
-        top_number = masks_layer - worst_number
-
-        # Stack the list of attention scores into a tensor
+          att_list.append(att_no_head_cls)
+          
+        worst_number = int(rw_layer/2)
+        top_number = rw_layer - worst_number
+      
         attns = torch.stack(att_list, dim=0)
-
-        # Consider attention scores starting from the specified layer
         attns = attns[starting_layer:, :]
-
-        # Get the indices of the top attention scores
         topk_values, topk_indices = torch.topk(attns, k=top_number, dim=1, largest=True, sorted=True)
-
-        # Get the indices of the worst attention scores
         worstk_values, worstk_indices = torch.topk(attns, k=worst_number, dim=1, largest=False, sorted=True)
-
-        # Concatenate the indices of the top and worst attention scores
-        indices = torch.cat([topk_indices, worstk_indices], dim=1)
-
-        # Return the concatenated indices
+        indices = torch.cat([topk_indices, worstk_indices], dim = 1)
         return indices
+        
+        
+          
 
     def get_similarity(self, embeddings):
         """
@@ -186,48 +215,111 @@ class SIGRATE:
         Returns:
             torch.Tensor: adjacency matrices.
         """
-
+      
+        B, N, D = embeddings.shape
+        
         # Normalize the vectors along the D dimension
         norm_embeddings = F.normalize(embeddings, p=2, dim=2)  # shape: [B, N, D]
         
         # Calculate the dot product between each pair of vectors
         similarity_matrix = torch.bmm(norm_embeddings, norm_embeddings.transpose(1, 2))  # shape: [B, N, N]
+
+        # # Transform the similarity between 0 and 1
+        similarity_matrix = torch.softmax(similarity_matrix, dim = 2)
         
         return similarity_matrix
           
 
-    def create_multilayer_emb(self, embeddings, starting_layer):
-        """
-        Creates adjacency matrices based on the similarity of the embeddings.
 
+    def create_multilayer_emb(self, embeddings, attentions, starting_layer):
+        """
+        Creates similarity matrices across multiple layers, combining embeddings.
+        Both are normalized to avoid domination by any layer.
+    
         Args:
-            embeddings (torch.Tensor): Embeddings weights across layers and nodes.
+            embeddings (list[Tensor]): [L, 1, T, D] — list of layer activations
+            attentions (list[Tensor]): [L, 1, H, T, T] — list of layer attentions
+            starting_layer (int): Index of the first layer to consider
+    
         Returns:
-            torch.Tensor: Multilayer adjacency matrices.
+            torch.Tensor: [L', T, T] similarity matrices from selected layers
         """
-
+    
         embeddings_list = []
-      
-        for i in range(1, len(embeddings)):
-          # Get the embeddings of the first and only image          
-          embeddings_image = embeddings[i][0]
-          embeddings_list.append(embeddings_image)
-
-        # Stack the aggregated embeddings across layers
+        att_no_head = []
+    
+        for i in range(len(embeddings)):
+            emb = embeddings[i][0]  # [T, D]
+            att = attentions[i][0]  # [H, T, T]
+    
+            # Remove special tokens
+            if isinstance(self.model, ViTForImageClassification):
+                emb = emb[1:]
+                att = att[:, 1:, 1:]
+            else:
+                emb = emb[2:]
+                att = att[:, 2:, 2:]
+    
+            embeddings_list.append(emb)
+            att_no_head.append(att.mean(dim=0))  # [T, T]
+    
+        # Convert to tensors: [L, T, D] or [L, T, T]
         embeddings_tensor = torch.stack(embeddings_list, dim=0)
+        att_tensor = torch.stack(att_no_head, dim=0)
+    
+        # Slice from starting layer
+        embeddings_tensor = embeddings_tensor[starting_layer:]
+        att_tensor = att_tensor[starting_layer:]
+    
+        # ---- 🔄 Normalize each layer's embedding and gradient ---- #
+        def normalize(tensor):
+            # L2 normalization along the feature dimension (dim=-1)
+            norm = torch.norm(tensor, dim=-1, keepdim=True) + 1e-6
+            return tensor / norm
+    
+        norm_embeddings = normalize(embeddings_tensor)  # [L, T, D]
+        norm_att = normalize(att_tensor)
+    
+        # ---- ⚙️ Combine with element-wise product ---- #
+        scaled_emb = norm_embeddings# * norm_gradients.mean(dim = 2).unsqueeze(-1)  # [L, T, D]
+    
+        # ---- 🔍 Compute pairwise similarity across tokens ---- #
+        similarity_multilayer = self.get_similarity(scaled_emb)  # [L, T, T]
+
+        L, T, _ = similarity_multilayer.shape
+        mask = torch.eye(T, device=similarity_multilayer.device).bool()  # [T, T]
+        similarity_multilayer[:, mask] = 0
+    
+        return similarity_multilayer#*norm_att
+
+  
+    def crea_matrice_adiacenza(self, B, N, row_mean):
+        # Determina la dimensione della griglia
+        dim = math.ceil(math.sqrt(N))
+        
+        # Inizializza la matrice di adiacenza con zeri
+        matrice_adiacenza = torch.zeros((N, N), dtype=torch.int, device = row_mean.device)
+
+        val = 1
       
-        # Extract relevant embeddings based on model type
-        if isinstance(self.model, ViTForImageClassification):
-            embeddings_tensor = embeddings_tensor[:, 1:, :].to(self.device)  # embeddings without the CLS token
-        else:
-            embeddings_tensor = embeddings_tensor[:, 2:, :].to(self.device)  # embeddings without the CLS and the distillation token
+        for i in range(N):
+            # Connessione orizzontale (verso destra)
+            if (i % dim) < (dim - 1) and (i + 1) < N:
+                matrice_adiacenza[i, i + 1] = val
+                matrice_adiacenza[i + 1, i] = val
+            
+            # Connessione verticale (verso il basso)
+            if (i + dim) < N:
+                matrice_adiacenza[i, i + dim] = val
+                matrice_adiacenza[i + dim, i] = val
+        
+        # Espandi la matrice per includere la dimensione batch
+        matrice_adiacenza = matrice_adiacenza.unsqueeze(0).expand(B, N, N)
 
+        matrice_adiacenza = matrice_adiacenza * 1/N # row_mean[:, :, None]
+        
+        return matrice_adiacenza
 
-        embeddings_tensor = embeddings_tensor[starting_layer:, :, :]
-
-        similarity_multilayer = self.get_similarity(embeddings_tensor)
-
-        return similarity_multilayer
 
 
     def modify_image(self, operation, heatmap, image, percentage, baseline, device):
@@ -285,114 +377,61 @@ class SIGRATE:
         return modified_image
 
 
-    def calculate_masks_layer(self, adj_matrix, masks_length, starting_node):
-        """
-        Create a masks on a given adjacency matrix.
 
-        Parameters:
-        adj_matrix (torch.Tensor): The adjacency matrix of the graph. Shape: (num_nodes, num_nodes).
-                                   It represents the connectivity of the nodes in the graph.
-        masks_length (int): The length of the masks.
-        starting_node (int): The starting node for the masks.
-
-        Returns:
-        torch.Tensor: A tensor containing the sequence of nodes visited.
-                      Shape: (masks_length + 1,). The first element is the starting node.
-        """
-
-        # Number of nodes in the graph
-        N = adj_matrix.size(0)
-
-        # Initialize the masks tensor with the starting node. The length is masks_length + 1 to include the starting node.
-        masks = torch.full((masks_length + 1,), starting_node, dtype=torch.long)
-
-        # Create a tensor to track visited nodes, initialized to False
-        visited = torch.zeros(N, dtype=torch.bool)
-
-        # Mark the starting node as visited
-        visited[starting_node] = True
-
-        # Initialize the current node to the starting node
+    def calculate_random_walk(self, adj_matrix, walk_length, starting_node):
+        walk = torch.full((walk_length + 1,), starting_node, dtype=torch.long)
         current_node = starting_node
-
-        # Create the masks
-        for i in range(1, masks_length + 1):
-            # Get the probabilities (edge weights) for the current node's neighbors
-            probabilities = adj_matrix[current_node]
-
-            # Set the probabilities of already visited nodes to 0
-            probabilities[visited] = 0
-
-            # Select the next node with the highest probability
-            next_node = torch.max(probabilities, dim=0)[1]
-
-            # Add the next node to the masks
-            masks[i] = next_node
-
-            # Mark the next node as visited
-            visited[next_node] = True
-
-            # Update the current node to the next node
+        previous_node = -1  # Nessun nodo precedente all'inizio
+    
+        for i in range(1, walk_length + 1):
+            neighbors = adj_matrix[current_node].clone()
+    
+            # Evita il nodo immediatamente precedente
+            if previous_node != -1:
+                neighbors[previous_node] = 0
+    
+            # Se non ci sono più archi validi, termina il walk
+            if torch.all(neighbors == 0):
+                break
+    
+            # Scegli il nodo con l'arco più pesante (escluso quello precedente)
+            next_node = torch.argmax(neighbors).item()
+            walk[i] = next_node
+    
+            # Dimezza (o moltiplica per 0.8) il peso dell'arco percorso
+            adj_matrix[current_node, next_node] *= 0.5
+            adj_matrix[next_node, current_node] *= 0.5  # perché il grafo è non orientato
+    
+            # Aggiorna per il passo successivo
+            previous_node = current_node
             current_node = next_node
 
-        # Return the sequence of nodes visited
-        return masks
+        return walk
 
-    def get_masks(self, multilayer, token_ratio, masks_layer, starting_nodes):
-        """
-        Generate masks for every layer of the embedding matrix.
 
-        Parameters:
-        multilayer (torch.Tensor): A 3D tensor representing the multilayer network.
-                                   Shape: (num_layers, num_nodes, num_nodes), where each
-                                   slice along the first dimension is an adjacency matrix
-                                   for a layer.
-        token_ratio (float): Ratio to determine the size of the masks. The size
-                             is computed as masks_length = int(num_nodes * token_ratio).
-        masks_layer (int): Number of masks for each layer.
-        starting_nodes (list of lists): A list containing lists of starting nodes for each
-                                        masks in each layer. Shape: (num_layers, masks_layer).
 
-        Returns:
-        list: A list of masks generated. Each mask is produced by the
-              `calculate_masks_layer` method.
-        """
+      
 
-        # Calculate the size of the masks based on the token_ratio
-        masks_length = int(multilayer.shape[1] * token_ratio)
-
-        # Initialize an empty list to store the generated masks
+    def get_masks(self, multilayer, token_ratio, rw_layer, starting_nodes):
+        walk_length = int(multilayer.shape[1] * token_ratio)
         masks = []
-
-        # Iterate through each layer in the multilayer network
+    
         for layer in range(multilayer.shape[0]):
-            # Get the starting nodes for the current layer
             starting_nodes_layer = starting_nodes[layer]
-
-            # Get the adjacency matrix for the current layer
-            adj_matrix = multilayer[layer]
-
-            # Remove self-loops by setting the diagonal elements to zero
+            adj_matrix = multilayer[layer].clone()
             adj_matrix.fill_diagonal_(0)
-
-            # Create the specified number of masks for the current layer
-            for current_rw in range(masks_layer):
-                # Get the starting node for the current mask
-                starting_node_current_rw = starting_nodes_layer[current_rw]
-
-                # Calculate the mask
-                # The `clone()` method ensures the original adjacency matrix is not modified
-                rw_mask = self.calculate_masks_layer(
-                    adj_matrix.clone(),
-                    masks_length,
-                    starting_node_current_rw.item()
-                )
-
-                # Add the generated mask to the list of masks
+    
+            for current_rw in range(rw_layer):
+                starting_node_current_rw = starting_nodes_layer[current_rw].item()
+                rw_mask = self.calculate_random_walk(adj_matrix, walk_length, starting_node_current_rw)
+                rw_mask = torch.unique(rw_mask)
                 masks.append(rw_mask)
-
-        # Return the list of generated masks
+    
         return masks
+
+
+
+
 
     def get_insertion_deletion(self, patch_perc, heatmap, image, baseline, label):
         """
@@ -444,6 +483,8 @@ class SIGRATE:
         """
         outputs = self.model(obscured_inputs)
         probabilities = F.softmax(outputs.logits, dim=1)
+
+        predicted_class_indices = torch.argmax(probabilities, dim=1)
 
         true_class_probs = probabilities[:, true_class_index]
 
